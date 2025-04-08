@@ -1,7 +1,6 @@
 import requests
 import os
 from dotenv import load_dotenv
-from requests import session
 import datetime
 from product_mapping import PRODUCTS_MAPPING
 import aiohttp
