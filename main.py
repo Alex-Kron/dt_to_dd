@@ -68,9 +68,7 @@ async def get_dd_engagements(session, base_url: str, token: str) -> set:
 async def create_dd_engagement(session, base_url: str, token: str, name: str):
     url = f"{base_url}/api/v2/engagements/"
     product_id = PRODUCTS_MAPPING.get(name, 3)
-    if "candidate" in name:
-        product_id = 3
-    else:
+    if product_id is None:
         product_id = 1
     headers = {
         "Authorization": f"Token {token}",
