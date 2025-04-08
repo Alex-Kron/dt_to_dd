@@ -1,3 +1,4 @@
 .env
 product_mapping.py
 delete.py
+.idea
