@@ -61,12 +61,16 @@ def get_dd_engagements(base_url: str, token: str) -> set:
 def create_dd_engagement(base_url: str, token: str, name: str):
     url = f"{base_url}/api/v2/engagements/"
     product_id = PRODUCTS_MAPPING.get(name, 3)
+    if "candidate" in name:
+        product_id = 3
+    else:
+        product_id = 1
     headers = {
         "Authorization": f"Token {token}",
         "Content-Type": "application/json"
     }
     data = {
-        "tags": ["Dependency Track"],
+        "tags": [],
         "name": name,
         "description": "Import from Dependency Track",
         "version": None,
@@ -139,7 +143,32 @@ def upload_scan_to_dd(base_url: str, token: str, engagement_id: int, scan_data: 
     data = {
         "engagement": str(engagement_id),
         "scan_type": "Dependency Track Finding Packaging Format (FPF) Export",
-        "tags": version
+        "tags": "dependency-track",
+        "test_title": version
+    }
+
+    # Отправляем файл как бинарные данные
+    files = {
+        "file": ("scan.fpf", scan_data)
+    }
+
+    response = requests.post(url, headers=headers, files=files, data=data)
+
+    if response.status_code not in [200, 201]:
+        raise Exception(f"Ошибка загрузки скана: {response.status_code} - {response.text}")
+
+def reimport_scan_to_dd(base_url: str, token: str, engagement_id: int, scan_data: bytes, test_id: int):
+    url = f"{base_url}/api/v2/reimport-scan/"
+    headers = {
+        "Authorization": f"Token {token}"
+    }
+
+    # Преобразуем данные в формат string($binary)
+    data = {
+        "engagement": str(engagement_id),
+        "scan_type": "Dependency Track Finding Packaging Format (FPF) Export",
+        "tags": "dependency-track",
+        "test": test_id
     }
 
     # Отправляем файл как бинарные данные
@@ -153,6 +182,24 @@ def upload_scan_to_dd(base_url: str, token: str, engagement_id: int, scan_data: 
         raise Exception(f"Ошибка загрузки скана: {response.status_code} - {response.text}")
 
 
+def get_tests_by_engagement_id(engagement_id: int, base_url: str, token: str):
+    headers = {
+        "Authorization": f"Token {token}",
+    }
+    url = f"{base_url}/api/v2/tests/"
+    params = {"engagement": engagement_id}
+    response = requests.get(url, headers=headers, params=params)
+    response.raise_for_status()
+    return response.json().get("results", [])
+
+def test_exists_with_title(tests, test_title):
+    return any(test["title"] == test_title for test in tests)
+
+def test_get_id(tests, test_title):
+    for test in tests:
+        if test["title"] == test_title:
+            return test["id"]
+
 def process_projects(dt_base_url: str, dt_token: str, dd_base_url: str, dd_token: str):
     projects = get_dt_projects(dt_base_url, dt_token)
     engagements = get_dd_engagements(dd_base_url, dd_token)
@@ -165,11 +212,17 @@ def process_projects(dt_base_url: str, dt_token: str, dd_base_url: str, dd_token
         engagement_id = engagements.get(project_name)
         if engagement_id:
             scan_data = download_fpf_file(dt_base_url, dt_token, project_id)
-            upload_scan_to_dd(dd_base_url, dd_token, engagement_id, scan_data, project_version)
-            print(f"Загружен FPF файл для {project_name} (версия {project_version}) в engagement {engagement_id}")
-        else:
-            print(f"Engagement для {project_name} не найден в DefectDojo")
 
+            tests = get_tests_by_engagement_id(engagement_id, dd_base_url, dd_token)
+            if not test_exists_with_title(tests, project_version):
+                upload_scan_to_dd(dd_base_url, dd_token, engagement_id, scan_data, project_version)
+                print(f"Загружен FPF файл для {project_name} (версия {project_version}) в engagement {engagement_id}")
+            else:
+                test_id = test_get_id(tests, project_version)
+                reimport_scan_to_dd(dd_base_url, dd_token, engagement_id, scan_data, test_id)
+                print(f"Выполнен reimport для {project_name} (версия {project_version}) в engagement {engagement_id}")
+        else:
+            print(f"Engagement для {project_name} не найден в DefectDojo")\
 
 def main():
     dt_token = get_dependency_track_token(DT_URL, DT_USERNAME, DT_PASSWORD)
