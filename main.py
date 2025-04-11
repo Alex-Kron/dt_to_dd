@@ -1,11 +1,14 @@
+import json
+
 import requests
 import os
 from dotenv import load_dotenv
-import datetime
+from datetime import datetime
 from product_mapping import PRODUCTS_MAPPING
 import aiohttp
 import asyncio
 import argparse
+import re
 
 load_dotenv()
 
@@ -80,8 +83,8 @@ async def create_dd_engagement(session, base_url: str, token: str, name: str):
         "description": "Import from Dependency Track",
         "version": None,
         "first_contacted": None,
-        "target_start": "2025-04-01",
-        "target_end": "2030-04-01",
+        "target_start": "2025-01-01",
+        "target_end": "2030-01-01",
         "reason": None,
         "tracker": None,
         "test_strategy": "",
@@ -141,25 +144,44 @@ async def download_fpf_file(session, base_url: str, token: str, project_id: str)
             raise Exception(f"Ошибка скачивания FPF файла: {response.status} - {text}")
         return await response.read()
 
-async def upload_scan_to_dd(session, base_url: str, token: str, engagement_id: int, scan_data: bytes, version: str):
+async def upload_scan_to_dd(session, base_url: str, token: str, engagement_id: int, scan_data: bytes, version: str, scan_date: str):
     url = f"{base_url}/api/v2/import-scan/"
     headers = {
         "Authorization": f"Token {token}"
     }
 
+    num = None
+    tool = None
+
+    if 'release/' in version:
+        match = re.search(r'release/(\d+)-(.*)', version)
+        if match:
+            num = match.group(1)
+            tool = match.group(2)
+
     # Преобразуем данные в формат string($binary)
     data = {
+        "scan_date": scan_date,
         "engagement": str(engagement_id),
         "scan_type": "Dependency Track Finding Packaging Format (FPF) Export",
-        "tags": "dependency-track",
-        "test_title": version
+        "tags": ["dependency-track"],
+        "close_old_findings": "true",
+        "test_title": str(version),
     }
+
+    tags = ["dependency-track"]
+    if num:
+        tags.append(num)
+    if tool:
+        tags.append(tool)
+
+    data["tags"] = ",".join(tags)
 
     form = aiohttp.FormData()
     form.add_field("file", scan_data, filename="scan.fpf", content_type="application/octet-stream")
 
     for key, value in data.items():
-        form.add_field(key, value)
+        form.add_field(key, str(value))
 
     async with session.post(url, headers=headers, data=form) as response:
         if response.status not in [200,201]:
@@ -167,7 +189,7 @@ async def upload_scan_to_dd(session, base_url: str, token: str, engagement_id: i
             raise Exception(f"Ошибка загрузки скана: {response.status_code} - {response.text}")
 
 
-async def reimport_scan_to_dd(session, base_url: str, token: str, engagement_id: int, scan_data: bytes, test_id: int):
+async def reimport_scan_to_dd(session, base_url: str, token: str, engagement_id: int, scan_data: bytes, test_id: int, scan_date: str):
     url = f"{base_url}/api/v2/reimport-scan/"
     headers = {
         "Authorization": f"Token {token}"
@@ -175,10 +197,12 @@ async def reimport_scan_to_dd(session, base_url: str, token: str, engagement_id:
 
     # Преобразуем данные в формат string($binary)
     data = {
+        "scan_date": scan_date,
         "engagement": str(engagement_id),
         "scan_type": "Dependency Track Finding Packaging Format (FPF) Export",
         "tags": "dependency-track",
-        "test": str(test_id)
+        "close_old_findings": "true",
+        "test": str(test_id),
     }
 
     form = aiohttp.FormData()
@@ -190,7 +214,7 @@ async def reimport_scan_to_dd(session, base_url: str, token: str, engagement_id:
     async with session.post(url, headers=headers, data=form) as response:
         if response.status not in [200, 201]:
             text = await response.text()
-            raise Exception(f"Ошибка загрузки скана: {response.status_code} - {response.text}")
+            raise Exception(f"Ошибка загрузки скана: {response.status_code} - {text}")
 
 
 async def get_tests_by_engagement_id(session, engagement_id: int, base_url: str, token: str):
@@ -224,6 +248,8 @@ async def process_projects(session, dt_base_url: str, dt_token: str, dd_base_url
     for project in projects:
         project_name = project["name"]
         project_id = project["uuid"]
+        dt = datetime.fromtimestamp(int(project["lastBomImport"]) / 1000)
+        project_date = dt.strftime('%Y-%m-%d')
         project_version = project.get("version", "unknown")
         engagement_id = engagements.get(project_name)
 
@@ -235,24 +261,26 @@ async def process_projects(session, dt_base_url: str, dt_token: str, dd_base_url
         test_exists = test_exists_with_title(tests, project_version)
         if test_exists:
             test_id = test_get_id(tests, project_version)
+        else:
+            test_id = -1
         task = asyncio.create_task(
-            handle_project(session, dt_base_url, dd_base_url, dt_token, dd_token, project_id, project_name, engagement_id, project_version, test_exists, test_id, reimport)
+            handle_project(session, dt_base_url, dd_base_url, dt_token, dd_token, project_id, project_name, engagement_id, project_version, test_exists, test_id, project_date, reimport)
         )
         tasks.append(task)
     await asyncio.gather(*tasks)
 
-async def handle_project(session, dt_base_url, dd_base_url, dt_token, dd_token, project_id, project_name, engagement_id, project_version, test_exists, test_id, reimport):
-    timestamp = datetime.datetime.now()
+async def handle_project(session, dt_base_url, dd_base_url, dt_token, dd_token, project_id, project_name, engagement_id, project_version, test_exists, test_id, scan_date, reimport):
+    timestamp = datetime.now()
     if not test_exists:
         scan_data = await download_fpf_file(session, dt_base_url, dt_token, project_id)
-        await upload_scan_to_dd(session, dd_base_url, dd_token, engagement_id, scan_data, project_version)
-        print(f"{timestamp} [IMPORT] Проект {project_name}: добавлено сканирование - {project_version} (isTestExist: {test_exists}, test_id: {test_id})")
+        await upload_scan_to_dd(session, dd_base_url, dd_token, engagement_id, scan_data, project_version, scan_date)
+        print(f"{timestamp} [IMPORT] Проект {project_name}: добавлено сканирование - {project_version} (isTestExist: {test_exists}, test_id: {test_id}, test_date: {scan_date})")
     elif reimport:
         scan_data = await download_fpf_file(session, dt_base_url, dt_token, project_id)
-        await reimport_scan_to_dd(session, dd_base_url, dd_token, engagement_id, scan_data, test_id)
-        print(f"{timestamp} [REIMPORT] Проект {project_name}: обновлено сканирование - {project_version} (isTestExist: {test_exists}, test_id: {test_id})")
+        await reimport_scan_to_dd(session, dd_base_url, dd_token, engagement_id, scan_data, test_id, scan_date)
+        print(f"{timestamp} [REIMPORT] Проект {project_name}: обновлено сканирование - {project_version} (isTestExist: {test_exists}, test_id: {test_id}, test_date: {scan_date})")
     else:
-        print(f"{timestamp} [WARNING] Проект {project_name}: реимпорт выключен - {project_version} (isTestExist: {test_exists}, test_id: {test_id})")
+        print(f"{timestamp} [WARNING] Проект {project_name}: реимпорт выключен - {project_version} (isTestExist: {test_exists}, test_id: {test_id}, test_date: {scan_date})")
 
 async def main():
     parser = argparse.ArgumentParser(description="Скрипт для работы с проектами Dependency-Track и DefectDojo.")
