@@ -171,9 +171,9 @@ async def upload_scan_to_dd(session, base_url: str, token: str, engagement_id: i
 
     tags = ["dependency-track"]
     if num:
-        tags.append(num)
+        data["version"] = num
     if tool:
-        tags.append(tool)
+        data["service"] = tool
 
     data["tags"] = ",".join(tags)
 
